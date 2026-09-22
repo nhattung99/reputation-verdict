@@ -46,6 +46,7 @@ Owner-only `invalidate_report` marks spam or clearly invalid `PENDING` submissio
 2. **Equivalence on the decision (`validator_fn`)**
    - The validator re-runs `leader_fn` on its own web fetches and LLM call.
    - **Tier match (exact):** `TRUSTED` / `NEUTRAL` / `RISKY` / `INCONCLUSIVE` must match. Tier drives the trust decision.
+   - **Supporting-source count (exact):** `sources_read` is recomputed independently and must match.
    - **Score tolerance:** +/- 5 within the same tier.
    - **Confidence banding:** scores are grouped into three bands (0-34, 35-79, 80-100). Same band is enough.
    - Reasoning text is not compared.
