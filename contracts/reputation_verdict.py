@@ -243,15 +243,19 @@ Return ONLY raw JSON, no markdown, no backticks:
             leader_tier = lp.get("tier")
             leader_score = lp.get("score")
             leader_conf = lp.get("confidence")
+            leader_src = lp.get("sources_read")
 
             if leader_tier not in ["TRUSTED", "NEUTRAL", "RISKY", "INCONCLUSIVE"]:
                 return False
             try:
                 ls = int(leader_score)
                 lc = int(leader_conf)
+                lsrc = int(leader_src)
                 if not (0 <= ls <= 100):
                     return False
                 if not (0 <= lc <= 100):
+                    return False
+                if lsrc < 0:
                     return False
             except Exception:
                 return False
@@ -262,6 +266,12 @@ Return ONLY raw JSON, no markdown, no backticks:
                 return False
 
             if my_result.get("tier") != leader_tier:
+                return False
+
+            try:
+                if int(my_result.get("sources_read", -1)) != lsrc:
+                    return False
+            except Exception:
                 return False
 
             try:
