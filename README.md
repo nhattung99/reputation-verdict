@@ -119,22 +119,23 @@ Latest recorded run: **20 passed**.
 
 ## Deployment
 
-- **CONTRACT_ADDRESS:** `0xb5129E7FfD77cA96177a37A7efFbE65923cC8a74`
+- **CONTRACT_ADDRESS:** `0xbA029eA9979857CB6F22178B3D0EB03a05422E59`
 - **NETWORK:** `studionet`
-- **Explorer:** https://explorer-studio.genlayer.com/address/0xb5129E7FfD77cA96177a37A7efFbE65923cC8a74
+- **Explorer:** https://explorer-studio.genlayer.com/address/0xbA029eA9979857CB6F22178B3D0EB03a05422E59
 - **Studio:** https://studio.genlayer.com
-- **Suggested public repo name:** `reputation-verdict`
+- **GitHub:** https://github.com/nhattung99/reputation-verdict
 - **Contract file:** `contracts/reputation_verdict.py` (`class Contract`)
+- **Superseded address:** `0xb5129E7FfD77cA96177a37A7efFbE65923cC8a74` (pre-hardening deploy)
 
-### Live read (real result, 2026-09-22)
+### Live read (real result, 2026-09-23)
 
-A read-only call against the studionet address returned:
+A read-only call against the redeployed studionet address returned:
 
 - `get_count()` -> `0`
 - `list_reports("")` -> `[]`
 - schema methods: `submit_request`, `evaluate_reputation`, `invalidate_report`, `get_report`, `get_latest_report`, `get_score`, `list_reports`, `get_count`
 
-Deploy tx on explorer: constructor `FINALIZED` / `Accepted` (created Sep 22, 2026). No reputation reports have been submitted on this deployment yet, so there is no on-chain `evaluate_reputation` receipt to quote. The call sequence below is an **illustrative expected example** taken from the passing unit tests (same public API the live schema exposes).
+No reputation reports have been submitted on this deployment yet, so there is no on-chain `evaluate_reputation` receipt to quote. The call sequence below is an **illustrative expected example** taken from the passing unit tests (same public API the live schema exposes).
 
 ### Worked example (illustrative expected output)
 
