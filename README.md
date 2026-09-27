@@ -46,7 +46,8 @@ Owner-only `invalidate_report` marks spam or clearly invalid `PENDING` submissio
 2. **Equivalence on the decision (`validator_fn`)**
    - The validator re-runs `leader_fn` on its own web fetches and LLM call.
    - **Tier match (exact):** `TRUSTED` / `NEUTRAL` / `RISKY` / `INCONCLUSIVE` must match. Tier drives the trust decision.
-   - **Supporting-source count (exact):** `sources_read` is recomputed independently and must match.
+   - **Supporting-source count (exact):** `sources_read` is **derived from actual `web.render` fetch results** (readable body length > 30), never taken from the LLM. Both sides must match.
+   - **Zero-source invariant:** if `sources_read == 0`, the accepted and stored result must be `INCONCLUSIVE` with score `0`. The validator rejects any non-`INCONCLUSIVE` tier or positive score paired with zero readable sources.
    - **Score tolerance:** +/- 5 within the same tier.
    - **Confidence banding:** scores are grouped into three bands (0-34, 35-79, 80-100). Same band is enough.
    - Reasoning text is not compared.
@@ -85,9 +86,10 @@ Owner-only `invalidate_report` marks spam or clearly invalid `PENDING` submissio
 ## Edge cases handled
 
 - **Web fetch failure:** every `web.render` is wrapped in try/except; `leader_fn` never throws.
-- **All sources fail:** still produces an `INCONCLUSIVE` attestation.
-- **Partial source failure:** one dead URL and one readable page still yield a verdict.
-- **LLM parse failure / unknown tier:** normalize to `INCONCLUSIVE` / score 0.
+- **All sources fail / empty bodies:** `sources_read` is derived as `0` from fetch results; code forces `INCONCLUSIVE` / score `0` without trusting the LLM. Validator rejects any other pairing.
+- **Partial source failure:** one dead URL and one readable page still yield a verdict; `sources_read` equals the readable fetch count.
+- **LLM parse failure / unknown tier:** normalize to `INCONCLUSIVE` / score 0 (with fetch-derived `sources_read`).
+- **LLM `sources_read` ignored:** stored count always comes from readable fetch results.
 - **Tier/score mismatch:** leader corrects score to the tier band before consensus.
 - **Submit guards:** non-empty `subject_id`, 1-5 unique `http(s)` URLs, non-empty `scored_at`.
 - **Already evaluated:** `evaluate_reputation` only runs while status is `PENDING`.
@@ -113,7 +115,7 @@ pip install -r requirements-dev.txt
 gltest tests/
 ```
 
-Latest recorded run: **20 passed**.
+Latest recorded run: **22 passed**.
 
 ---
 

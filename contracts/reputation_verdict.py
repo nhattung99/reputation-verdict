@@ -24,6 +24,35 @@ def _to_address(val) -> Address:
     return Address(val)
 
 
+def _render_text(res) -> str:
+    """Extract readable text from gl.nondet.web.render result."""
+    if res is None:
+        return ""
+    if isinstance(res, str):
+        return res
+    if isinstance(res, (bytes, bytearray)):
+        return bytes(res).decode("utf-8", errors="replace")
+    if isinstance(res, dict):
+        if "text" in res:
+            return str(res.get("text") or "")
+        if "body" in res:
+            body = res.get("body")
+            if isinstance(body, (bytes, bytearray)):
+                return bytes(body).decode("utf-8", errors="replace")
+            return str(body or "")
+        ok = res.get("ok")
+        if isinstance(ok, dict):
+            return _render_text(ok)
+    if hasattr(res, "text"):
+        return str(getattr(res, "text") or "")
+    if hasattr(res, "body"):
+        body = getattr(res, "body")
+        if isinstance(body, (bytes, bytearray)):
+            return bytes(body).decode("utf-8", errors="replace")
+        return str(body or "")
+    return str(res)
+
+
 @allow_storage
 @dataclass
 class ReputationReport:
@@ -127,7 +156,7 @@ class Contract(gl.Contract):
             for url in evidence_urls_list:
                 try:
                     res = gl.nondet.web.render(url)
-                    body = res.body if hasattr(res, "body") else str(res)
+                    body = _render_text(res)
                     if body and len(body.strip()) > 30:
                         evidence_results.append(
                             "Evidence [" + url + "]:\n" + body[:3000]
@@ -141,6 +170,17 @@ class Contract(gl.Contract):
                     evidence_results.append(
                         "Evidence [" + url + "]: (fetch failed: " + str(e) + ")"
                     )
+
+            # Zero-source invariant: no readable evidence => INCONCLUSIVE / score 0.
+            # sources_read is derived from fetch results, never trusted from the LLM.
+            if readable_count == 0:
+                return {
+                    "score": 0,
+                    "tier": "INCONCLUSIVE",
+                    "confidence": 0,
+                    "sources_read": 0,
+                    "reasoning": "No readable evidence could be fetched from submitted URLs."
+                }
 
             prompt = f"""You are an expert AI agent reputation analyst on GenLayer.
 Your job is to assess the trustworthiness and reliability of an AI agent
@@ -164,13 +204,13 @@ Scoring guide:
 - 50-79 (NEUTRAL): Mixed or limited evidence, no major red flags but not enough to fully trust
 - 0-49 (RISKY): Red flags present, negative history, suspicious patterns, or insufficient verifiable history
 
-If fewer than 1 source returned readable content, return INCONCLUSIVE.
+If fewer than 1 source returned readable content, you must return INCONCLUSIVE with score 0.
+Do not invent sources_read; the contract derives that count from actual fetch results.
 
 Return ONLY raw JSON, no markdown, no backticks:
 {{"score": <0-100>,
   "tier": "TRUSTED"|"NEUTRAL"|"RISKY"|"INCONCLUSIVE",
   "confidence": <0-100>,
-  "sources_read": <integer>,
   "reasoning": "<2-3 sentences citing specific evidence signals>"}}"""
 
             raw = gl.nondet.exec_prompt(prompt, response_format="json")
@@ -211,11 +251,8 @@ Return ONLY raw JSON, no markdown, no backticks:
                 except Exception:
                     conf = 0
 
-                try:
-                    src_read = max(0, min(len(evidence_urls_list),
-                                    int(parsed.get("sources_read", readable_count))))
-                except Exception:
-                    src_read = readable_count
+                # Derive sources_read from actual fetch results only.
+                src_read = readable_count
 
                 return {
                     "score": score,
@@ -233,36 +270,52 @@ Return ONLY raw JSON, no markdown, no backticks:
                     "reasoning": "Parse error: " + str(e)
                 }
 
+        def _attestation_ok(payload) -> bool:
+            if not isinstance(payload, dict):
+                return False
+            tier = payload.get("tier")
+            if tier not in ["TRUSTED", "NEUTRAL", "RISKY", "INCONCLUSIVE"]:
+                return False
+            try:
+                score = int(payload.get("score", -1))
+                conf = int(payload.get("confidence", -1))
+                src = int(payload.get("sources_read", -1))
+            except Exception:
+                return False
+            if not (0 <= score <= 100):
+                return False
+            if not (0 <= conf <= 100):
+                return False
+            if src < 0:
+                return False
+            # Zero-source invariant: reject non-INCONCLUSIVE or positive score
+            # when no readable evidence was fetched.
+            if src == 0:
+                if tier != "INCONCLUSIVE" or score != 0:
+                    return False
+            return True
+
         def validator_fn(leader_res) -> bool:
             if not isinstance(leader_res, gl.vm.Return):
                 return False
             lp = leader_res.calldata
-            if not isinstance(lp, dict):
+            if not _attestation_ok(lp):
                 return False
 
             leader_tier = lp.get("tier")
-            leader_score = lp.get("score")
-            leader_conf = lp.get("confidence")
-            leader_src = lp.get("sources_read")
-
-            if leader_tier not in ["TRUSTED", "NEUTRAL", "RISKY", "INCONCLUSIVE"]:
-                return False
             try:
-                ls = int(leader_score)
-                lc = int(leader_conf)
-                lsrc = int(leader_src)
-                if not (0 <= ls <= 100):
-                    return False
-                if not (0 <= lc <= 100):
-                    return False
-                if lsrc < 0:
-                    return False
+                ls = int(lp.get("score"))
+                lc = int(lp.get("confidence"))
+                lsrc = int(lp.get("sources_read"))
             except Exception:
                 return False
 
             try:
                 my_result = leader_fn()
             except Exception:
+                return False
+
+            if not _attestation_ok(my_result):
                 return False
 
             if my_result.get("tier") != leader_tier:
@@ -283,8 +336,6 @@ Return ONLY raw JSON, no markdown, no backticks:
 
             try:
                 mc = int(my_result.get("confidence", 0))
-                if not (0 <= mc <= 100):
-                    return False
             except Exception:
                 return False
 
@@ -303,13 +354,19 @@ Return ONLY raw JSON, no markdown, no backticks:
 
         result_tier = result_data.get("tier", "INCONCLUSIVE")
         result_score = int(result_data.get("score", 0))
+        result_src = int(result_data.get("sources_read", 0))
+
+        # Enforce zero-source invariant on stored state.
+        if result_src == 0:
+            result_tier = "INCONCLUSIVE"
+            result_score = 0
 
         report.score = bigint(result_score)
         report.tier = result_tier
-        report.sources_read = bigint(int(result_data.get("sources_read", 0)))
+        report.sources_read = bigint(result_src)
         report.reasoning = str(result_data.get("reasoning", ""))
 
-        if result_tier == "INCONCLUSIVE" or report.sources_read == bigint(0):
+        if result_tier == "INCONCLUSIVE" or result_src == 0:
             report.status = "INCONCLUSIVE"
         else:
             report.status = "SCORED"

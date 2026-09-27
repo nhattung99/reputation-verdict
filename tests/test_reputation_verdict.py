@@ -1,6 +1,14 @@
 import json
 
 
+def _web(vm, pattern, body):
+    """Register a web mock in the flat dict format gltest expects."""
+    if callable(body):
+        vm.mock_web(pattern, body)
+    else:
+        vm.mock_web(pattern, {"method": "GET", "status": 200, "body": str(body)})
+
+
 def _submit(
     contract,
     direct_vm,
@@ -17,8 +25,8 @@ def _submit(
 
 
 def _mock_trusted_sources(direct_vm):
-    direct_vm.mock_web(r".*github.*", "500+ commits, 3 years active, 120 stars on public repositories")
-    direct_vm.mock_web(r".*etherscan.*", "2,400 transactions, 0 failed, active since 2023 with clean history")
+    _web(direct_vm, r".*github.*", "500+ commits, 3 years active, 120 stars on public repositories")
+    _web(direct_vm, r".*etherscan.*", "2,400 transactions, 0 failed, active since 2023 with clean history")
 
 
 def _mock_llm(direct_vm, payload):
@@ -38,8 +46,8 @@ def test_trusted_score_happy_path(direct_vm, direct_deploy, direct_alice):
     assert report_id == "1"
     assert contract.get_count() == 1
 
-    direct_vm.mock_web(r".*github.*", "500+ commits, 3 years active, 120 stars")
-    direct_vm.mock_web(r".*etherscan.*", "2,400 transactions, 0 failed, active since 2023")
+    _web(direct_vm, r".*github.*", "500+ commits, 3 years active, 120 stars on public repositories")
+    _web(direct_vm, r".*etherscan.*", "2,400 transactions, 0 failed, active since 2023 with clean history")
 
     direct_vm.mock_llm(r".*reputation analyst.*", json.dumps({
         "score": 88,
@@ -97,8 +105,8 @@ def test_risky_score(direct_vm, direct_deploy, direct_alice):
         urls=["https://github.com/agent-risky", "https://etherscan.io/address/0xRISK"],
         scored_at="2026-04-01T00:00:00Z",
     )
-    direct_vm.mock_web(r".*github.*", "Brand new account with almost no commits and deleted repos")
-    direct_vm.mock_web(r".*etherscan.*", "Multiple failed txs and community scam reports linked to this address")
+    _web(direct_vm, r".*github.*", "Brand new account with almost no commits and deleted repos")
+    _web(direct_vm, r".*etherscan.*", "Multiple failed txs and community scam reports linked to this address")
     _mock_llm(direct_vm, {
         "score": 25,
         "tier": "RISKY",
@@ -125,17 +133,14 @@ def test_all_sources_fail_inconclusive(direct_vm, direct_deploy, direct_alice):
         urls=["https://down-a.example.com/x", "https://down-b.example.com/y"],
     )
 
-    def _raise(_url=None):
-        raise RuntimeError("source unreachable")
-
-    direct_vm.mock_web(r".*down-a.*", _raise)
-    direct_vm.mock_web(r".*down-b.*", _raise)
+    # Unmocked URLs raise MockNotFoundError inside web.render (caught as fetch fail).
+    # Intentionally no successful web mocks for down-a / down-b.
     _mock_llm(direct_vm, {
-        "score": 0,
-        "tier": "INCONCLUSIVE",
-        "confidence": 5,
-        "sources_read": 0,
-        "reasoning": "No readable evidence could be fetched from submitted URLs."
+        "score": 99,
+        "tier": "TRUSTED",
+        "confidence": 99,
+        "sources_read": 5,
+        "reasoning": "Should be ignored when no evidence is readable."
     })
 
     contract.evaluate_reputation(report_id)
@@ -144,6 +149,60 @@ def test_all_sources_fail_inconclusive(direct_vm, direct_deploy, direct_alice):
     assert result["status"] == "INCONCLUSIVE"
     assert result["tier"] == "INCONCLUSIVE"
     assert result["score"] == 0
+    assert result["sources_read"] == 0
+
+
+def test_sources_read_derived_from_fetch(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy("contracts/reputation_verdict.py")
+    report_id = _submit(
+        contract,
+        direct_vm,
+        direct_alice,
+        urls=["https://github.com/agent-src", "https://etherscan.io/address/0xSRC"],
+    )
+    _mock_trusted_sources(direct_vm)
+    # LLM lies about sources_read; contract must use actual fetch count (2).
+    _mock_llm(direct_vm, {
+        "score": 82,
+        "tier": "TRUSTED",
+        "confidence": 88,
+        "sources_read": 99,
+        "reasoning": "Two independent readable sources support a trusted score."
+    })
+
+    contract.evaluate_reputation(report_id)
+
+    result = json.loads(contract.get_score(report_id))
+    assert result["status"] == "SCORED"
+    assert result["tier"] == "TRUSTED"
+    assert result["sources_read"] == 2
+
+
+def test_empty_bodies_zero_source_inconclusive(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy("contracts/reputation_verdict.py")
+    report_id = _submit(
+        contract,
+        direct_vm,
+        direct_alice,
+        urls=["https://empty-a.example.com/x", "https://empty-b.example.com/y"],
+    )
+    _web(direct_vm, r".*empty-a.*", "short")
+    _web(direct_vm, r".*empty-b.*", "  ")
+    _mock_llm(direct_vm, {
+        "score": 70,
+        "tier": "NEUTRAL",
+        "confidence": 60,
+        "sources_read": 2,
+        "reasoning": "Should not apply when bodies are too short to count as readable."
+    })
+
+    contract.evaluate_reputation(report_id)
+
+    result = json.loads(contract.get_score(report_id))
+    assert result["status"] == "INCONCLUSIVE"
+    assert result["tier"] == "INCONCLUSIVE"
+    assert result["score"] == 0
+    assert result["sources_read"] == 0
 
 
 def test_partial_source_failure(direct_vm, direct_deploy, direct_alice):
@@ -155,11 +214,8 @@ def test_partial_source_failure(direct_vm, direct_deploy, direct_alice):
         urls=["https://github.com/agent-partial", "https://down.example.com/fail"],
     )
 
-    def _raise(_url=None):
-        raise RuntimeError("fetch timeout")
-
-    direct_vm.mock_web(r".*github.*", "Consistent open-source activity over two years with reviews")
-    direct_vm.mock_web(r".*down\.example.*", _raise)
+    _web(direct_vm, r".*github.*", "Consistent open-source activity over two years with reviews")
+    # down.example is intentionally unmocked so web.render fails for that URL.
     _mock_llm(direct_vm, {
         "score": 72,
         "tier": "NEUTRAL",
@@ -185,7 +241,7 @@ def test_single_url_allowed(direct_vm, direct_deploy, direct_alice):
         urls=["https://github.com/single-agent"],
         scored_at="2026-05-01T12:00:00Z",
     )
-    direct_vm.mock_web(r".*github.*", "Moderate contribution history with a few public repositories")
+    _web(direct_vm, r".*github.*", "Moderate contribution history with a few public repositories")
     _mock_llm(direct_vm, {
         "score": 58,
         "tier": "NEUTRAL",
@@ -242,7 +298,7 @@ def test_evaluate_already_scored(direct_vm, direct_deploy, direct_alice):
         direct_alice,
         urls=["https://github.com/agent-scored"],
     )
-    direct_vm.mock_web(r".*github.*", "Solid contribution history across multiple repositories")
+    _web(direct_vm, r".*github.*", "Solid contribution history across multiple repositories")
     _mock_llm(direct_vm, {
         "score": 84,
         "tier": "TRUSTED",
@@ -297,7 +353,7 @@ def test_malformed_llm_json_fallback(direct_vm, direct_deploy, direct_alice):
         direct_alice,
         urls=["https://github.com/agent-badjson"],
     )
-    direct_vm.mock_web(r".*github.*", "Readable profile content with contribution history present")
+    _web(direct_vm, r".*github.*", "Readable profile content with contribution history present")
     direct_vm.mock_llm(r".*reputation analyst.*", "not valid json!!")
 
     contract.evaluate_reputation(report_id)
@@ -316,7 +372,7 @@ def test_invalid_tier_normalized(direct_vm, direct_deploy, direct_alice):
         direct_alice,
         urls=["https://github.com/agent-tier"],
     )
-    direct_vm.mock_web(r".*github.*", "Readable profile content with contribution history present")
+    _web(direct_vm, r".*github.*", "Readable profile content with contribution history present")
     _mock_llm(direct_vm, {
         "tier": "EXCELLENT",
         "score": 95,
@@ -341,7 +397,7 @@ def test_tier_score_consistency(direct_vm, direct_deploy, direct_alice):
         direct_alice,
         urls=["https://github.com/agent-consistency"],
     )
-    direct_vm.mock_web(r".*github.*", "Long track record with strong reviews and deliveries")
+    _web(direct_vm, r".*github.*", "Long track record with strong reviews and deliveries")
     _mock_llm(direct_vm, {
         "tier": "TRUSTED",
         "score": 40,
@@ -368,7 +424,7 @@ def test_list_reports_filter(direct_vm, direct_deploy, direct_alice, direct_bob)
         id2 = contract.submit_request(
             "agent-two", "two", ["https://github.com/two"], "2026-02-01")
 
-    direct_vm.mock_web(r".*github.*", "Readable contribution history for filtering test")
+    _web(direct_vm, r".*github.*", "Readable contribution history for filtering test")
     _mock_llm(direct_vm, {
         "score": 70,
         "tier": "NEUTRAL",
